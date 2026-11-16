@@ -1,0 +1,96 @@
+# ============================================================
+# Crime Map - docker-compose.yaml
+# Layanan: db (PostgreSQL + PostGIS), api (FastAPI), nginx (reverse proxy)
+# Jalankan : docker compose up -d --build
+# Hentikan : docker compose down        (data tetap ada di volume)
+# Reset DB : docker compose down -v     (HAPUS data, init.sql dijalankan ulang)
+# ============================================================
+
+name: crimemap
+
+services:
+  # ----------------------------------------------------------
+  # 1) Database: PostgreSQL + PostGIS (data kejadian & akun)
+  # ----------------------------------------------------------
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: crimemap-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-crimemap}
+      POSTGRES_USER: ${DB_USER:-crimemap}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Isi DB_PASSWORD di file .env}
+      TZ: Asia/Jakarta
+    volumes:
+      # data database tetap ada walau container dihapus
+      - pgdata:/var/lib/postgresql/data
+      # dijalankan otomatis HANYA saat volume masih kosong (pertama kali)
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-crimemap} -d ${DB_NAME:-crimemap}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    mem_limit: 512m          # batasi memori karena laptop terbatas
+    networks:
+      - backend
+    # Port database TIDAK dibuka ke luar. Jika perlu mengintip data dengan
+    # aplikasi seperti DBeaver, aktifkan baris di bawah (hanya untuk localhost):
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+
+  # ----------------------------------------------------------
+  # 2) API: backend FastAPI (dibangun dari Dockerfile sendiri)
+  # ----------------------------------------------------------
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: crimemap-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-crimemap}:${DB_PASSWORD}@db:5432/${DB_NAME:-crimemap}
+      JWT_SECRET: ${JWT_SECRET:?Isi JWT_SECRET di file .env}
+      JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-60}
+      TZ: Asia/Jakarta
+    depends_on:
+      db:
+        condition: service_healthy   # api baru jalan setelah db siap
+    expose:
+      - "8000"                       # hanya terlihat oleh container lain, bukan dari luar
+    mem_limit: 256m
+    networks:
+      - frontend
+      - backend
+
+  # ----------------------------------------------------------
+  # 3) Nginx: satu-satunya pintu masuk dari luar
+  # ----------------------------------------------------------
+  nginx:
+    image: nginx:alpine
+    container_name: crimemap-nginx
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-80}:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - api
+    mem_limit: 64m
+    networks:
+      - frontend
+
+# ------------------------------------------------------------
+# Jaringan: nginx tidak bisa menjangkau db secara langsung
+#   internet -> nginx -> api -> db
+# ------------------------------------------------------------
+networks:
+  frontend:
+  backend:
+
+# ------------------------------------------------------------
+# Penyimpanan permanen database
+# ------------------------------------------------------------
+volumes:
+  pgdata:
